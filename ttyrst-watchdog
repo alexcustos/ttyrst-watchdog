@@ -1,0 +1,24 @@
+#!/sbin/runscript
+# Created by Aleksandr Borisenko
+
+SCRIPT="/usr/local/bin/ttyrst-watchdog.sh"
+SCRIPTNAME=`basename ${SCRIPT} .sh`
+LOGFILE="/var/log/${SCRIPTNAME}.log"
+PIDFILE="/run/${SCRIPTNAME}.pid"
+
+start() {
+	checkpath -f -m 0644 -o root:root "${LOGFILE}"
+
+	ebegin "Starting ${SCRIPTNAME} daemon"
+	start-stop-daemon --start --background \
+		--exec "${SCRIPT}" --pidfile "${PIDFILE}" \
+		--stdout "${LOGFILE}" --stderr "${LOGFILE}" \
+		--env PIDFILE=${PIDFILE} -- start
+	eend $?
+}
+
+stop() {
+	ebegin "Stopping ${SCRIPTNAME} daemon"
+	start-stop-daemon --stop --exec "${SCRIPT}" --pidfile "${PIDFILE}"
+	eend $?
+}

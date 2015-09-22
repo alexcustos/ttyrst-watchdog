@@ -1,0 +1,5 @@
+# /etc/udev/rules.d/51-ttyrst-watchdog.rules
+
+# udevadm info -a -p "$(udevadm info -q path -n /dev/ttyUSB0)"
+# udevadm control --reload-rules
+ACTION=="add", KERNEL=="ttyUSB[0-9]*", SUBSYSTEM=="tty" SUBSYSTEMS=="usb", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", SYMLINK+="ttyrst-watchdog"
