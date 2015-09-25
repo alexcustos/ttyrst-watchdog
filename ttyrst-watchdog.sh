@@ -74,7 +74,7 @@ function retrieve_log()
 	else
 		log_lines=$1
 	fi
-    device_cmd "log $log_lines" "10s"
+	device_cmd "log $log_lines" "10s"
 }
 
 function timestamp_local()
@@ -88,21 +88,22 @@ function timestamp_local()
 function device_init()
 {
 	if [ ! -c "${DEVICE}" ]; then
-		fatal_error "No watchdog device detected!"
+		$1 "No watchdog device detected!"
 	fi
 	if [ "$(device_wait 15s)" != "OK" ]; then
-		fatal_error "The watchdog device is busy!"
+		$1 "The watchdog device is busy!"
 	fi
-	stty -F "${DEVICE}" cs8 9600 raw ignbrk noflsh -onlcr -iexten -echo -echoe -echok -echoctl -echoke -crtscts -hupcl
+	stty -F "${DEVICE}" cs8 9600 raw ignbrk noflsh -onlcr -iexten -echo -echoe -echok -echoctl -echoke -crtscts
 	ts_local=$(timestamp_local)
 	ts_device=$(device_cmd "sync $ts_local")
 	if [ "$ts_local" != "$ts_device" ]; then
-		fatal_error "The watchdog device initialization failed! ($ts_device)"
+		$1 "The watchdog device initialization failed! ($ts_device)"
 	fi
 }
 
 function update_timer()
 {
+	result="FAIL"
 	status=$(device_cmd "timer "$(timestamp_local)" ${WATCHDOG_TIMER}")
 	if [ "$status" != "${WATCHDOG_ACTIVE}" ]; then
 		if [ "$status" == "YES" ]; then
@@ -110,10 +111,11 @@ function update_timer()
 		elif [ "$status" == "NO" ]; then
 			result=$(device_cmd "activate")
 		fi
-	else
+	elif [ "$status" == "YES" ] || [ "$status" == "NO" ]; then
 		result="OK"
 	fi
 	if [ "$result" != "OK" ]; then
+		device_init log_message
 		log_message "The watchdog timer was NOT updated properly! ($status)"
 	fi
 }
@@ -170,7 +172,7 @@ fi
 case "$1" in
 	"start")
 		single_instance
-		device_init
+		device_init fatal_error
 		trap deactivate SIGINT SIGTERM
 		while true; do
 			if is_alive; then
@@ -180,7 +182,7 @@ case "$1" in
     	done
 		;;
 	"status")
-		device_init
+		device_init fatal_error
 		status=$(device_cmd "status")
 		if [ ! -z "$status" ]; then 
 			IFS=';' read -ra PART <<< "$status"
@@ -190,14 +192,14 @@ case "$1" in
 		fi
 		;;
 	"reset")
-		device_init
+		device_init fatal_error
 		status=$(device_cmd "reset" "10s")
 		if [ "$status" != "OK" ]; then
 			echo "It is most likely that the device was not reset properly. Please try again."
 		fi
 		;;
 	"log")
-		device_init
+		device_init fatal_error
 		retrieve_log $2
 		;;
 	*)
