@@ -28,6 +28,7 @@ function device_wait()
 	if [ ! -z "$1" ]; then
 		timeout $1 bash -c "while fuser ${DEVICE} >/dev/null 2>&1; do true; done"
 	fi
+	sleep `bc <<< "scale=4; ${RANDOM}/32767/4"`  # 0.25 max
 	if ! fuser ${DEVICE} >/dev/null 2>&1; then
 		echo "OK"
 	fi
@@ -36,33 +37,22 @@ function device_wait()
 function device_cmd()
 {
 	cmd=$1
-	if [ ! -z "$2" ]; then
-		tw=$2
-	else
-		tw="1s"
-	fi
-	if [ -c ${DEVICE} ]; then
-		if [ "$(device_wait 10s)" == "OK" ]; then
-			exec 3< <(timeout $tw cat <${DEVICE})
-			sleep 0.2
-			# echo "CMD: $cmd" >>/tmp/ttyrst-watchdog.log
-			echo "$cmd" >${DEVICE}
-			if [[ $cmd == log* ]]; then
-				while read log_line <&3; do
-					log_line=$(echo -n "$log_line" | tr -d '\r\n')
-					if [ "$log_line" == "DONE" ]; then
-						break
-					fi
-					echo "$log_line"
-				done
-			else
-				echo -n $(head -n1 <&3 | tr -d '\r\n')
-			fi
+	if [ -r /dev/fd/3 ]; then
+		# echo "CMD: $cmd" >>/tmp/ttyrst-watchdog.log
+		echo "$cmd" >${DEVICE}
+		if [[ $cmd == log* ]]; then
+			while read log_line <&3; do
+				log_line=$(echo -n "$log_line" | tr -d '\r\n')
+				if [ "$log_line" == "DONE" ]; then
+					break
+				fi
+				echo "$log_line"
+			done
+			exec 3>&-
 		else
-			echo -n "WAIT"
+			echo -n $(head -n1 <&3 | tr -d '\r\n')
+			exec 3>&-
 		fi
-	else
-		echo -n "NODEV"
 	fi
 }
 
@@ -74,7 +64,7 @@ function retrieve_log()
 	else
 		log_lines=$1
 	fi
-	device_cmd "log $log_lines" "10s"
+	device_cmd "log $log_lines"
 }
 
 function timestamp_local()
@@ -90,33 +80,71 @@ function device_init()
 	if [ ! -c "${DEVICE}" ]; then
 		$1 "No watchdog device detected!"
 	fi
-	if [ "$(device_wait 15s)" != "OK" ]; then
-		$1 "The watchdog device is busy!"
-	fi
 	stty -F "${DEVICE}" cs8 9600 raw ignbrk noflsh -onlcr -iexten -echo -echoe -echok -echoctl -echoke -crtscts
+}
+
+function device_lock()
+{
+	if [ ! -z "$2" ]; then
+		tw=$2
+	else
+		tw="1s"
+	fi
+	if [ -c ${DEVICE} ]; then
+		if [ "$(device_wait 15s)" == "OK" ]; then
+			exec 3< <(timeout $tw cat <${DEVICE})
+			sleep 0.2
+			return 0  # true
+		else
+			$1 "The watchdog device is busy!"
+		fi
+	else
+		$1 "No watchdog device detected!"
+	fi
+	return 1  # false
+}
+
+function device_check()
+{
 	ts_local=$(timestamp_local)
 	ts_device=$(device_cmd "sync $ts_local")
 	if [ "$ts_local" != "$ts_device" ]; then
-		$1 "The watchdog device initialization failed! ($ts_device)"
+		fatal_error "The watchdog device initialization failed!"
 	fi
+}
+
+function device_ready()
+{
+	if [ ! -z "$1" ]; then
+		tw=$1
+	else
+		tw="1s"
+	fi
+	device_init fatal_error
+	if device_lock fatal_error $tw; then
+		device_check
+	fi
+	return 0  # true
 }
 
 function update_timer()
 {
-	result="FAIL"
-	status=$(device_cmd "timer "$(timestamp_local)" ${WATCHDOG_TIMER}")
-	if [ "$status" != "${WATCHDOG_ACTIVE}" ]; then
-		if [ "$status" == "YES" ]; then
-			result=$(device_cmd "deactivate")
-		elif [ "$status" == "NO" ]; then
-			result=$(device_cmd "activate")
+	if device_lock log_message; then  # 1s
+		result="FAIL"
+		status=$(device_cmd "timer "$(timestamp_local)" ${WATCHDOG_TIMER}")
+		if [ "$status" != "${WATCHDOG_ACTIVE}" ]; then
+			if [ "$status" == "YES" ]; then
+				result=$(device_cmd "deactivate")
+			elif [ "$status" == "NO" ]; then
+				result=$(device_cmd "activate")
+			fi
+		elif [ "$status" == "YES" ] || [ "$status" == "NO" ]; then
+			result="OK"
 		fi
-	elif [ "$status" == "YES" ] || [ "$status" == "NO" ]; then
-		result="OK"
-	fi
-	if [ "$result" != "OK" ]; then
-		device_init log_message
-		log_message "The watchdog timer was NOT updated properly! ($status)"
+		if [ "$result" != "OK" ]; then
+			device_init log_message
+			log_message "The watchdog timer was NOT updated properly!"
+		fi
 	fi
 }
 
@@ -124,15 +152,15 @@ function deactivate()
 {
 	rm -f ${PIDFILE};
 
-	errmsg="The watchdog device was NOT deactivated!"
-	if [ "$(device_wait 10s)" != "OK" ]; then
-		fatal_error $errmsg
+	device_init log_message
+	if device_lock log_message; then  # 1s
+		status=$(device_cmd "deactivate")
+		if [ "$status" == "OK" ]; then
+			exit 0
+		fi
 	fi
-	status=$(device_cmd "deactivate")
-	if [ "$status" != "OK" ]; then
-		fatal_error $errmsg
-	fi
-	exit 0
+	echo "deactivate" >${DEVICE}
+	fatal_error "It is most likely that the watchdog was NOT deactivated properly!"
 }
 
 function single_instance()
@@ -172,7 +200,7 @@ fi
 case "$1" in
 	"start")
 		single_instance
-		device_init fatal_error
+		device_ready  # 1s
 		trap deactivate SIGINT SIGTERM
 		while true; do
 			if is_alive; then
@@ -182,9 +210,9 @@ case "$1" in
     	done
 		;;
 	"status")
-		device_init fatal_error
+		device_ready  # 1s
 		status=$(device_cmd "status")
-		if [ ! -z "$status" ]; then 
+		if [ ! -z "$status" ]; then
 			IFS=';' read -ra PART <<< "$status"
 			echo ${PART[0]}" Status: "${PART[1]}"; Activated: "${PART[2]}"; Timer: "${PART[3]}" sec; Minimum to reset: "${PART[4]}" sec."
 		else
@@ -192,14 +220,14 @@ case "$1" in
 		fi
 		;;
 	"reset")
-		device_init fatal_error
-		status=$(device_cmd "reset" "10s")
+		device_ready "10s"
+		status=$(device_cmd "reset")
 		if [ "$status" != "OK" ]; then
-			echo "It is most likely that the device was not reset properly. Please try again."
+			echo "It is most likely that the device was NOT reset properly. Please try again."
 		fi
 		;;
 	"log")
-		device_init fatal_error
+		device_ready "10s"
 		retrieve_log $2
 		;;
 	*)
