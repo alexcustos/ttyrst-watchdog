@@ -10,11 +10,12 @@ DEFAULT_LOG_LINES=0  # 0 - show all lines
 
 SCRIPTNAME=`basename $0`
 PIDFILE=${PIDFILE-/run/${SCRIPTNAME%.sh}.pid}
+LOCKPID=0
 E_OPTERROR=65
 
 function fatal_error()
 {
-	echo `date '+%d-%m-%y %H:%M:%S'` "$1" > /dev/stderr
+	echo `date '+%d-%m-%y %H:%M:%S'` "$1"
 	exit 1
 }
 
@@ -48,23 +49,11 @@ function device_cmd()
 				fi
 				echo "$log_line"
 			done
-			exec 3>&-
 		else
 			echo -n $(head -n1 <&3 | tr -d '\r\n')
-			exec 3>&-
 		fi
+		exec 3>&-
 	fi
-}
-
-function retrieve_log()
-{
-	re='^[0-9]+$'
-	if ! [[ $1 =~ $re ]]; then
-		log_lines=${DEFAULT_LOG_LINES}
-	else
-		log_lines=$1
-	fi
-	device_cmd "log $log_lines"
 }
 
 function timestamp_local()
@@ -93,6 +82,7 @@ function device_lock()
 	if [ -c ${DEVICE} ]; then
 		if [ "$(device_wait 15s)" == "OK" ]; then
 			exec 3< <(timeout $tw cat <${DEVICE})
+			LOCKPID=$(ps -eo pid,args | grep "timeout $tw cat" | grep -v grep | awk '{ print $1 }')
 			sleep 0.2
 			return 0  # true
 		else
@@ -102,6 +92,14 @@ function device_lock()
 		$1 "No watchdog device detected!"
 	fi
 	return 1  # false
+}
+
+function device_release()
+{
+	if [ "$LOCKPID" -gt "0" ]; then
+		kill $LOCKPID
+		LOCKPID=0
+	fi
 }
 
 function device_check()
@@ -220,18 +218,27 @@ case "$1" in
 		fi
 		;;
 	"reset")
+		exec 2>/dev/null
 		device_ready "10s"
 		status=$(device_cmd "reset")
+		device_release
 		if [ "$status" != "OK" ]; then
 			echo "It is most likely that the device was NOT reset properly. Please try again."
 		fi
 		;;
 	"log")
+		exec 2>/dev/null
 		device_ready "10s"
-		retrieve_log $2
+		if [[ $2 =~ ^[0-9]+$ ]]; then
+			log_lines=$2
+		else
+			log_lines=${DEFAULT_LOG_LINES}
+		fi
+		device_cmd "log $log_lines"
+		device_release
 		;;
 	*)
-		echo "Unknown argument: $1." > /dev/stderr
+		echo "Unknown argument: $1."
 		usage
 		;;
 esac
